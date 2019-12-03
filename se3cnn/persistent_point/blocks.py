@@ -3,14 +3,16 @@ import torch.nn as nn
 
 import math
 
-import se3cnn.SO3 as SO3
 from se3cnn.non_linearities.rescaled_act import relu, sigmoid
 
 from se3cnn.SO3 import clebsch_gordan
 
+if torch.cuda.is_available():
+    from se3cnn import real_spherical_harmonics
+
 
 class DataHub(nn.Module):
-    def __init__(self, representations, normalization, device):
+    def __init__(self, representations, normalization, r_cut, device):
         super().__init__()
         assert len(self.representations) > 1, "there should be at list two representations to form a network"
         self.representations = representations  # layer representations
@@ -22,7 +24,10 @@ class DataHub(nn.Module):
         # As it is, it will only support gpu, but it may still be useful to select which one of them to use
         self.device = device
 
-        # Networks properties - calculate once (init)
+        # Network (fixed) properties
+        self.r_cut = r_cut
+
+        # Network properties - calculate once (init)
         self.max_l_out = None                                       # Max l_out in a network -> for Clebsch Gordan coefficients
         self.max_l_in = None                                        # Max l_in in a network -> for Clebsch Gordan coefficients
         self.max_l = None                                           # Max l in a network -> for Spherical Harmonics
@@ -35,6 +40,8 @@ class DataHub(nn.Module):
         self.mul_in_list = []
 
         self.norm_coef_list = []
+
+        self.rsh_norm_coefficients = None                           # 'sign' normalization for Spherical harmonics
 
         # jump points for C++/CUDA - calculate once (init)
         self.output_base_offsets = []
@@ -51,6 +58,7 @@ class DataHub(nn.Module):
         self.find_max_l_out_in()                                    # max_l_out, max_l_in, max_l
         self.calculate_l_out_in_and_mul_out_in_lists()              # l_out_list, l_in_list, mul_out_list, mul_in_list
         self.calculate_normalization_coefficients()                 # norm_coef_list
+        self.calculate_rsh_normalization_coefficients()             # rsh_no
         self.calculate_clebsch_gordan_coefficients_and_offsets()    # cg, features_base_offsets
         self.calculate_offsets()                                    # output_base_offsets, grad_base_offsets, features_base_offsets
 
@@ -67,6 +75,7 @@ class DataHub(nn.Module):
             max_l_in = max(running_max_l_in, max_l_in)
             max_l = max(running_max_l_out + running_max_l_in, max_l)
 
+        assert max_l <= 10, "l > 10 is not supported yet"
         self.max_l_out = max_l_out
         self.max_l_in = max_l_in
         self.max_l = max_l
@@ -106,6 +115,13 @@ class DataHub(nn.Module):
 
             self.norm_coef_list.append(norm_coef)
 
+    def calculate_rsh_normalization_coefficients(self):
+        # (-1)^L same as (pi-theta) -> (-1)^(L+m) and 'quantum' norm (-1)^m combined  # h - halved
+        rsh_norm_coef = [elem for lh in range((self.max_l + 1) // 2) for elem in [1.] * (4 * lh + 1) + [-1.] * (4 * lh + 3)]
+        if self.max_l % 2 == 0:
+            rsh_norm_coef.extend([1.] * (2 * self.max_l + 1))
+        self.rsh_norm_coefficients = torch.tensor(rsh_norm_coef, device=self.device).unsqueeze(1)
+
     def calculate_clebsch_gordan_coefficients_and_offsets(self):
         # TODO: test. most likely contains errors in ranges
         tmp_cg_base_offsets_list = []
@@ -141,26 +157,19 @@ class DataHub(nn.Module):
             self.grad_base_offsets.append(torch.tensor(tmp_grad_base_offset, dtype=torch.int32, device=self.device))
             self.features_base_offsets.append(torch.tensor(tmp_features_base_offset, dtype=torch.int32, device=self.device))
 
-    def forward(self, radii_vectors):
-        # self.radii = torch.nn.functional.normalize(radii_vectors, p=2, dim=-1) # need something else
-        self.Ys = SO3.spherical_harmonics_xyz(self.max_l, radii_vectors)  # TODO: wrong as is now, correct radii_vectors
+    def forward(self, radii_vectors, ab_p_to_a, ab_p_to_b):
+        # TODO: now is bs_list is pre-calculated, needed ab_p_to_a and ab_p_to_b, which is sort of inverse map (?)
+        # calculate absolute distances
+        self.radii = radii_vectors.norm(p=2, dim=-1)
 
+        # calculate Spherical harmonics
+        self.Ys = radii_vectors.new_empty(((self.max_l + 1) * (self.max_l + 1), radii_vectors.size(0)))  # [filters, batch_size]
+        real_spherical_harmonics.rsh(self.Ys, radii_vectors / self.radii.clamp_min(1e-12).unsqueze(1).expand_as(radii_vectors))
+        self.Ys.mul_(self.rsh_norm_coefficients)
 
-        max_l = max(order)
-        out = xyz.new_empty(((max_l + 1)*(max_l + 1), xyz.size(0)))                                    # [filters, batch_size]
-        xyz_unit = torch.nn.functional.normalize(xyz, p=2, dim=-1)
-        real_spherical_harmonics.rsh(out, xyz_unit)
-        norm_coef = [elem for lh in range((max_l+1)//2) for elem in [1.]*(4*lh + 1) + [-1.]*(4*lh+3)]  # (-1)^L same as (pi-theta) -> (-1)^(L+m) and 'quantum' norm (-1)^m combined  # h - halved
-        if max_l % 2 == 0:
-            norm_coef.extend([1.]*(2*max_l + 1))
-        norm_coef = torch.tensor(norm_coef, device=device).unsqueeze(1)
-        out.mul_(norm_coef)
-        if order != list(range(max_l+1)):
-            keep_rows = torch.zeros(out.size(0), dtype=torch.bool)
-            [keep_rows[(l*l):((l+1)*(l+1))].fill_(True) for l in order]
-            out = out[keep_rows.to(device)]
-
-
+        # assign inverse maps
+        self.map_ab_p_to_a = ab_p_to_a
+        self.map_ab_p_to_b = ab_p_to_b
 
 
 class EQNetwork(torch.nn.Module):
@@ -169,22 +178,27 @@ class EQNetwork(torch.nn.Module):
 
         representations = [[(mul, l) for l, mul in enumerate(rs)] for rs in representations]
 
-        R = partial(CosineBasisModel, max_radius=max_radius, number_of_basis=10, h=100, L=2, act=relu)
-        K = partial(Kernel, RadialModel=R)
-        C = partial(PeriodicConvolutionPrep, Kernel=K)
+        # TODO: unwind into 'independent' blocks
+        # R = partial(CosineBasisModel, max_radius=max_radius, number_of_basis=10, h=100, L=2, act=relu)
+        # K = partial(Kernel, RadialModel=R)
+        # C = partial(PeriodicConvolutionPrep, Kernel=K)
 
-        self.firstlayers = torch.nn.ModuleList([
-            GatedBlock(Rs_in, Rs_out, relu, sigmoid, C)
-            for Rs_in, Rs_out in zip(representations, representations[1:])
-        ])
+        # TODO: so that here it is sequential
+        # self.firstlayers = torch.nn.ModuleList([
+        #     GatedBlock(Rs_in, Rs_out, relu, sigmoid, C)
+        #     for Rs_in, Rs_out in zip(representations, representations[1:])
+        # ])
 
     def forward(self, radii, bs_slice, charges):
         p = next(self.parameters())
         # features = p.new_ones(len(charges), 1)
         features = p.new_tensor(charges.numpy()/94 - 0.5).unsqueeze(1)
 
+        # hm, why there was enumerate?
         for i, m in enumerate(self.firstlayers):
-            features = m(features.div(2), radii, bs_slice)
+            pass
+            # TODO: div(2) means div(sqrt(number of neighbor atoms)). Incorporate into Gate?
+            # features = m(features.div(2), radii, bs_slice)
 
         features = torch.mean(features, dim=0)
         return features
