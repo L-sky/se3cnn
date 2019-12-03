@@ -33,7 +33,7 @@ def tanh(x):
 
 
 def relu(x):
-    return x.relu().mul(2 ** 0.5)
+    return x.relu().mul(1.41421)           # sqrt(2) -> 1.41421
 
 
 def absolute(x):
