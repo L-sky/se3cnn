@@ -125,7 +125,7 @@ __global__ void backward_R_parent_cuda_kernel(
 	// add offsets
 		  T* const __restrict__ output_lout_lin	= output + (output_base_offsets[l_out_id*l_in_size + l_in_id] * ab_p_size);
 	const T* const __restrict__ W_lout_lin		= W + (l_out_id * l_in_size + l_in_id) * 2;
-	const T* const __restrict__ C_lout_lin		= C + C_offsets[l_out_id*l_in_max_net + l_in_id];
+	const T* const __restrict__ C_lout_lin		= C + C_offsets[l_out_id*l_in_max_net + l_in_id]; // TODO: change l_in_max_net + 1 or change to cardinality on prev wrapper
 	const T* const __restrict__ G_lout			= G + (G_base_offsets[l_out_id] * a_size);
 	const T* const __restrict__ F_lin			= F + (F_base_offsets[l_in_id] * a_size);
 

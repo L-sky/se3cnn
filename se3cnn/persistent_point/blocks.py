@@ -12,9 +12,9 @@ if torch.cuda.is_available():
 
 
 class DataHub(nn.Module):
-    def __init__(self, representations, normalization, r_cut, device):
+    def __init__(self, representations, r_cut, normalization='norm', device=torch.device('cuda:0')):
         super().__init__()
-        assert len(self.representations) > 1, "there should be at list two representations to form a network"
+        assert len(representations) > 1, "there should be at list two representations to form a network"
         self.representations = representations  # layer representations
 
         assert isinstance(normalization, str), "pass normalization type as a string, either 'norm' or 'component'"
@@ -58,7 +58,7 @@ class DataHub(nn.Module):
         self.find_max_l_out_in()                                    # max_l_out, max_l_in, max_l
         self.calculate_l_out_in_and_mul_out_in_lists()              # l_out_list, l_in_list, mul_out_list, mul_in_list
         self.calculate_normalization_coefficients()                 # norm_coef_list
-        self.calculate_rsh_normalization_coefficients()             # rsh_no
+        self.calculate_rsh_normalization_coefficients()             # rsh_norm_coefficients # TODO: move rsh normalization to CUDA code (template parameter?)
         self.calculate_clebsch_gordan_coefficients_and_offsets()    # cg, features_base_offsets
         self.calculate_offsets()                                    # output_base_offsets, grad_base_offsets, features_base_offsets
 
@@ -108,7 +108,7 @@ class DataHub(nn.Module):
         for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
             norm_coef = torch.zeros((len(Rs_out), len(Rs_in), 2), device=self.device)
             for i, (_, l_out, _) in enumerate(Rs_out):
-                num_summed_elements = sum([mul_in * (2*min(l_out, l_in) + 1) for mul_in, l_in, _ in Rs_in])  # (l_out + l_in) - |l_out - l_in| = 2*min(l_out, l_in)
+                num_summed_elements = sum([mul_in * (2 * min(l_out, l_in) + 1) for mul_in, l_in, _ in Rs_in])  # (l_out + l_in) - |l_out - l_in| = 2*min(l_out, l_in)
                 for j, (mul_in, l_in, _) in enumerate(Rs_in):
                     norm_coef[i, j, 0] = lm_normalization(l_out, l_in) / math.sqrt(mul_in)
                     norm_coef[i, j, 1] = lm_normalization(l_out, l_in) / math.sqrt(num_summed_elements)
@@ -123,35 +123,39 @@ class DataHub(nn.Module):
         self.rsh_norm_coefficients = torch.tensor(rsh_norm_coef, device=self.device).unsqueeze(1)
 
     def calculate_clebsch_gordan_coefficients_and_offsets(self):
-        # TODO: test. most likely contains errors in ranges
         tmp_cg_base_offsets_list = []
         tmp_cg_position = 0
-        # TODO: check if there should be +1 for range l_out and l_in
-        for l_out in range(self.max_l_out):
-            for l_in in range(self.max_l_in):
+        for l_out in range(self.max_l_out + 1):
+            for l_in in range(self.max_l_in + 1):
                 tmp_cg_base_offsets_list.append(tmp_cg_position)
                 for l_f in range(abs(l_out - l_in), l_out + l_in + 1):
-                    tmp_cg_position += l_f * (2 * l_out + 1) * (2 * l_in + 1) * (2 * l_f + 1)
+                    tmp_cg_position += (2 * l_out + 1) * (2 * l_in + 1) * (2 * l_f + 1)
 
-        self.cg_base_offsets = torch.tensor(tmp_cg_base_offsets_list, dtype=torch.int32, device=self.device)
+        self.cg = torch.zeros(tmp_cg_position, device=self.device)      # last tmp_cg_pos (not stored in offsets) = size
 
-        # tmp_cg_position should be pointing 1 after latest accessible index of cg, making it equal to the size
-        self.cg = torch.zeros(tmp_cg_position, device=self.device)
-
-        for l_out in range(self.max_l_out):
-            for l_in in range(self.max_l_in):
-                tmp_cg_base_pos = self.cg_base_offsets[l_out * self.max_l_in + l_in]
+        for l_out in range(self.max_l_out + 1):
+            for l_in in range(self.max_l_in + 1):
+                tmp_cg_base_pos = tmp_cg_base_offsets_list[l_out * (self.max_l_in + 1) + l_in]
                 for l_f in range(abs(l_out - l_in), l_out + l_in + 1):
-                    tmp_cg_flat = clebsch_gordan(l_out, l_in, l_f).view(-1).dtype(torch.get_default_dtype()).to(self.device)
+                    tmp_cg_flat = clebsch_gordan(l_out, l_in, l_f).view(-1).type(torch.get_default_dtype()).to(self.device)
                     self.cg[tmp_cg_base_pos:tmp_cg_base_pos + tmp_cg_flat.shape[0]] = tmp_cg_flat
                     tmp_cg_base_pos += tmp_cg_flat.shape[0]
+
+        self.cg_base_offsets = torch.tensor(tmp_cg_base_offsets_list, dtype=torch.int32, device=self.device)
 
     def calculate_offsets(self):
         from itertools import accumulate
         for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
-            tmp_output_base_offset = list(accumulate([mul_out * mul_in * (2*min(l_out, l_in) + 1) for (mul_out, l_out, _) in Rs_out for (mul_in, l_in, _) in Rs_in]))
-            tmp_grad_base_offset = list(accumulate(mul_out * (2*l_out + 1) for mul_out, l_out, _ in Rs_out))
-            tmp_features_base_offset = list(accumulate(mul_in * (2*l_in + 1) for mul_in, l_in, _ in Rs_in))
+            tmp_output_base_offset = list(accumulate([mul_out * mul_in * (2 * min(l_out, l_in) + 1) for (mul_out, l_out, _) in Rs_out for (mul_in, l_in, _) in Rs_in]))
+            tmp_grad_base_offset = list(accumulate(mul_out * (2 * l_out + 1) for mul_out, l_out, _ in Rs_out))
+            tmp_features_base_offset = list(accumulate(mul_in * (2 * l_in + 1) for mul_in, l_in, _ in Rs_in))
+
+            tmp_output_base_offset.insert(0, 0)
+            tmp_output_base_offset.pop()
+            tmp_grad_base_offset.insert(0, 0)
+            tmp_grad_base_offset.pop()
+            tmp_features_base_offset.insert(0, 0)
+            tmp_features_base_offset.pop()
 
             self.output_base_offsets.append(torch.tensor(tmp_output_base_offset, dtype=torch.int32, device=self.device))
             self.grad_base_offsets.append(torch.tensor(tmp_grad_base_offset, dtype=torch.int32, device=self.device))
