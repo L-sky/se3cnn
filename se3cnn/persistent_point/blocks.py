@@ -15,29 +15,6 @@ class DataHub(nn.Module):
         assert len(self.representations) > 1, "there should be at list two representations to form a network"
         self.representations = representations  # layer representations
 
-        self.max_l_out = None                   # Max l_out in a network -> for Clebsch Gordan coefficients
-        self.max_l_in = None                    # Max l_in in a network -> for Clebsch Gordan coefficients
-        self.max_l = None                       # Max l in a network -> for Spherical Harmonics
-        self.cg = None                          # Clebsch-Gordan coefficients that cover all layers of a network, without gaps
-
-        self.l_out_list = []
-        self.l_in_list = []
-        self.mul_out_list = []
-        self.mul_in_list = []
-        self.norm_coef_list = []
-
-        # jump points for C++/CUDA
-        self.output_base_offsets = None
-        self.grad_base_offsets = None
-        self.cg_base_offsets = None
-        self.features_base_offsets = None
-
-        # data specific to particular input
-        self.Ys = None                          # Spherical harmonics that cover all layers of a network
-        self.radii = None                       # Absolute distances
-        self.map_ab_p_to_a = None
-        self.map_ab_p_to_b = None
-
         assert isinstance(normalization, str), "pass normalization type as a string, either 'norm' or 'component'"
         assert normalization in ['norm', 'component'], "normalization needs to be either 'norm' or 'component'"
         self.normalization_type = normalization
@@ -45,46 +22,61 @@ class DataHub(nn.Module):
         # As it is, it will only support gpu, but it may still be useful to select which one of them to use
         self.device = device
 
-        # Setup values
-        max_l_out = 0
-        max_l_in = 0
-        max_l = 0
+        # Networks properties - calculate once (init)
+        self.max_l_out = None                                       # Max l_out in a network -> for Clebsch Gordan coefficients
+        self.max_l_in = None                                        # Max l_in in a network -> for Clebsch Gordan coefficients
+        self.max_l = None                                           # Max l in a network -> for Spherical Harmonics
+
+        self.cg = None                                              # Clebsch-Gordan coefficients
+
+        self.l_out_list = []
+        self.l_in_list = []
+        self.mul_out_list = []
+        self.mul_in_list = []
+
+        self.norm_coef_list = []
+
+        # jump points for C++/CUDA - calculate once (init)
+        self.output_base_offsets = []
+        self.grad_base_offsets = []
+        self.cg_base_offsets = []
+        self.features_base_offsets = []
+
+        # tied to input - recalculate on each forward call
+        self.Ys = None                                              # Spherical harmonics
+        self.radii = None                                           # Absolute distances
+        self.map_ab_p_to_a = None
+        self.map_ab_p_to_b = None
+
+        self.find_max_l_out_in()                                    # max_l_out, max_l_in, max_l
+        self.calculate_l_out_in_and_mul_out_in_lists()              # l_out_list, l_in_list, mul_out_list, mul_in_list
+        self.calculate_normalization_coefficients()                 # norm_coef_list
+        self.calculate_clebsch_gordan_coefficients_and_offsets()    # cg, features_base_offsets
+        self.calculate_offsets()                                    # output_base_offsets, grad_base_offsets, features_base_offsets
+
+    def find_max_l_out_in(self):
+        max_l_out = max_l_in = max_l = 0
 
         for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
             # running values are need to make sure max_l is not higher that needed (consequent layers)
             # e.g, rotational orders: [4, 6, 4] -> 12 (without), but [4, 6, 4] -> 10 (with)
-            running_max_l_out = 0
-            running_max_l_in = 0
-
-            tmp_l_out_list = []
-            tmp_l_in_list = []
-            tmp_mul_out_list = []
-            tmp_mul_in_list = []
-
-            norm_coef = torch.zeros((len(Rs_out), len(Rs_in), 2), device=self.device)
-
-            for mul_out, l_out, _ in Rs_out:
-                tmp_mul_out_list.append(mul_out)
-                tmp_l_out_list.append(l_out)
-                running_max_l_out = max(l_out, running_max_l_out)
-
-            for mul_in, l_in, _ in Rs_in:
-                tmp_mul_in_list.append(mul_in)
-                tmp_l_in_list.append(l_in)
-                running_max_l_in = max(l_in, running_max_l_in)
+            running_max_l_out = max([l_out for _, l_out, _ in Rs_out])
+            running_max_l_in = max([l_in for _, l_in, _ in Rs_in])
 
             max_l_out = max(running_max_l_out, max_l_out)
             max_l_in = max(running_max_l_in, max_l_in)
             max_l = max(running_max_l_out + running_max_l_in, max_l)
 
-            for i, (_, l_out, _) in enumerate(Rs_out):
-                num_summed_elements = 0
-                for mul_in, l_in, _ in enumerate(Rs_in):
-                    # TODO: account for parity, when it would be supported in CUDA code
-                    num_summed_elements += mul_in * (2*min(l_out, l_in) + 1)
-                for j, (mul_in, l_in, _) in enumerate(Rs_in):
-                    norm_coef[i, j, 0] = self.lm_normalization(l_out, l_in) / math.sqrt(mul_in)
-                    norm_coef[i, j, 1] = self.lm_normalization(l_out, l_in) / math.sqrt(num_summed_elements)
+        self.max_l_out = max_l_out
+        self.max_l_in = max_l_in
+        self.max_l = max_l
+
+    def calculate_l_out_in_and_mul_out_in_lists(self):
+        for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
+            tmp_l_out_list = [l_out for _, l_out, _ in Rs_out]
+            tmp_l_in_list = [l_in for _, l_in, _ in Rs_in]
+            tmp_mul_out_list = [mul_out for mul_out, _, _ in Rs_out]
+            tmp_mul_in_list = [mul_in for mul_in, _, _ in Rs_in]
 
             # so annoying that there is no uint32 data type in PyTorch
             self.l_out_list.append(torch.tensor(tmp_l_out_list, dtype=torch.int32, device=self.device))
@@ -92,22 +84,62 @@ class DataHub(nn.Module):
             self.mul_out_list.append(torch.tensor(tmp_mul_out_list, dtype=torch.int32, device=self.device))
             self.mul_in_list.append(torch.tensor(tmp_mul_in_list, dtype=torch.int32, device=self.device))
 
-            # TODO: or move it, and calculate from lists ?
+    def calculate_normalization_coefficients(self):
+        def lm_normalization(l_out, l_in):
+            # put 2l_in+1 to keep the norm of the m vector constant
+            # put 2l_ou+1 to keep the variance of each m component constant
+            # sum_m Y_m^2 = (2l+1)/(4pi)  and  norm(Q) = 1  implies that norm(QY) = sqrt(1/4pi)
+            lm_norm = None
+            if self.normalization_type == 'norm':
+                lm_norm = math.sqrt(2 * l_in + 1) * math.sqrt(4 * math.pi)
+            elif self.normalization_type == 'component':
+                lm_norm = math.sqrt(2 * l_out + 1) * math.sqrt(4 * math.pi)
+            return lm_norm
+
+        for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
+            norm_coef = torch.zeros((len(Rs_out), len(Rs_in), 2), device=self.device)
+            for i, (_, l_out, _) in enumerate(Rs_out):
+                num_summed_elements = sum([mul_in * (2*min(l_out, l_in) + 1) for mul_in, l_in, _ in Rs_in])  # (l_out + l_in) - |l_out - l_in| = 2*min(l_out, l_in)
+                for j, (mul_in, l_in, _) in enumerate(Rs_in):
+                    norm_coef[i, j, 0] = lm_normalization(l_out, l_in) / math.sqrt(mul_in)
+                    norm_coef[i, j, 1] = lm_normalization(l_out, l_in) / math.sqrt(num_summed_elements)
+
             self.norm_coef_list.append(norm_coef)
 
-            # TODO: still need to calculate cg and offsets
+    def calculate_clebsch_gordan_coefficients_and_offsets(self):
+        # TODO: test. most likely contains errors in ranges
+        tmp_cg_base_offsets_list = []
+        tmp_cg_position = 0
+        # TODO: check if there should be +1 for range l_out and l_in
+        for l_out in range(self.max_l_out):
+            for l_in in range(self.max_l_in):
+                tmp_cg_base_offsets_list.append(tmp_cg_position)
+                for l_f in range(abs(l_out - l_in), l_out + l_in + 1):
+                    tmp_cg_position += l_f * (2 * l_out + 1) * (2 * l_in + 1) * (2 * l_f + 1)
 
-    def lm_normalization(self, l_out, l_in):
-        # put 2l_in+1 to keep the norm of the m vector constant
-        # put 2l_ou+1 to keep the variance of each m component constant
-        # sum_m Y_m^2 = (2l+1)/(4pi)  and  norm(Q) = 1  implies that norm(QY) = sqrt(1/4pi)
-        lm_norm = None
-        if self.normalization_type == 'norm':
-            lm_norm = math.sqrt(2 * l_in + 1) * math.sqrt(4 * math.pi)
-        elif self.normalization_type == 'component':
-            lm_norm = math.sqrt(2 * l_out + 1) * math.sqrt(4 * math.pi)
-        return lm_norm
+        self.cg_base_offsets = torch.tensor(tmp_cg_base_offsets_list, dtype=torch.int32, device=self.device)
 
+        # tmp_cg_position should be pointing 1 after latest accessible index of cg, making it equal to the size
+        self.cg = torch.zeros(tmp_cg_position, device=self.device)
+
+        for l_out in range(self.max_l_out):
+            for l_in in range(self.max_l_in):
+                tmp_cg_base_pos = self.cg_base_offsets[l_out * self.max_l_in + l_in]
+                for l_f in range(abs(l_out - l_in), l_out + l_in + 1):
+                    tmp_cg_flat = clebsch_gordan(l_out, l_in, l_f).view(-1).dtype(torch.get_default_dtype()).to(self.device)
+                    self.cg[tmp_cg_base_pos:tmp_cg_base_pos + tmp_cg_flat.shape[0]] = tmp_cg_flat
+                    tmp_cg_base_pos += tmp_cg_flat.shape[0]
+
+    def calculate_offsets(self):
+        from itertools import accumulate
+        for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
+            tmp_output_base_offset = list(accumulate([mul_out * mul_in * (2*min(l_out, l_in) + 1) for (mul_out, l_out, _) in Rs_out for (mul_in, l_in, _) in Rs_in]))
+            tmp_grad_base_offset = list(accumulate(mul_out * (2*l_out + 1) for mul_out, l_out, _ in Rs_out))
+            tmp_features_base_offset = list(accumulate(mul_in * (2*l_in + 1) for mul_in, l_in, _ in Rs_in))
+
+            self.output_base_offsets.append(torch.tensor(tmp_output_base_offset, dtype=torch.int32, device=self.device))
+            self.grad_base_offsets.append(torch.tensor(tmp_grad_base_offset, dtype=torch.int32, device=self.device))
+            self.features_base_offsets.append(torch.tensor(tmp_features_base_offset, dtype=torch.int32, device=self.device))
 
     def forward(self, radii_vectors):
         # self.radii = torch.nn.functional.normalize(radii_vectors, p=2, dim=-1) # need something else
