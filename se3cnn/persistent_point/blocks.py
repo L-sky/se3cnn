@@ -151,11 +151,8 @@ class DataHub(nn.Module):
             tmp_features_base_offset = list(accumulate(mul_in * (2 * l_in + 1) for mul_in, l_in, _ in Rs_in))
 
             tmp_output_base_offset.insert(0, 0)
-            tmp_output_base_offset.pop()
             tmp_grad_base_offset.insert(0, 0)
-            tmp_grad_base_offset.pop()
             tmp_features_base_offset.insert(0, 0)
-            tmp_features_base_offset.pop()
 
             self.output_base_offsets.append(torch.tensor(tmp_output_base_offset, dtype=torch.int32, device=self.device))
             self.grad_base_offsets.append(torch.tensor(tmp_grad_base_offset, dtype=torch.int32, device=self.device))

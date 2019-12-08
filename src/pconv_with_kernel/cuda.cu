@@ -76,7 +76,7 @@ __global__ void forward_stage_one_parent_cuda_kernel(
 	const uint32_t l_min = abs((int32_t)l_out - (int32_t)l_in);
 	const uint32_t l_max = l_out + l_in;
 
-	const uint32_t threads_per_block = threads_per_block_forward_stage_one_parent_cuda_kernel()();
+	const uint32_t threads_per_block = threads_per_block_forward_stage_one_parent_cuda_kernel();
 	const uint32_t uiab_p_size = u_size * i_size * ab_p_size;
 
 	const uint32_t blocks = (uiab_p_size + threads_per_block - 1)/threads_per_block;
@@ -234,8 +234,8 @@ __global__ void backward_F_stage_one_child_cuda_kernel(
 
 	// deduce individual indices
 	const uint32_t v	= vjab_p / (j_size * ab_p_size);
-	const uint32_t j 	= (uiab_p - u * i_size * ab_p_size) / ab_p_size;
-	const uint32_t ab_p = uiab_p - u * i_size * ab_p_size - i * ab_p_size;
+	const uint32_t j 	= (vjab_p - v * i_size * ab_p_size) / ab_p_size;
+	const uint32_t ab_p = vjab_p - v * i_size * ab_p_size - j * ab_p_size;
 	const uint32_t a 	= ab_p_to_a[ab_p];
 
 	const T norm = W_lout_lin_r_nonzero + (T) (radii[ab_p] != 0.) * (W_lout_lin_r_zero - W_lout_lin_r_nonzero);
@@ -275,8 +275,8 @@ __global__ void backward_R_parent_cuda_kernel(
 		const uint32_t* const __restrict__ u_sizes,				// output multiplicities
 		const uint32_t* const __restrict__ v_sizes,				// input multiplicities
 		const uint32_t* const __restrict__ output_base_offsets,	// jump points for indexing output over l_out, l_in
-		const uint32_t* const __restrict__ G_base_offsets,		// jump points for indexing G over l_out
 		const uint32_t* const __restrict__ C_offsets,			// jump points for indexing C over l_out, l_in
+		const uint32_t* const __restrict__ G_base_offsets,		// jump points for indexing G over l_out
 		const uint32_t* const __restrict__ F_base_offsets, 		// jump points for indexing F over l_in
 		const uint32_t* const __restrict__ ab_p_to_a,			// map from composite index ab_p to a
 		const uint32_t* const __restrict__ ab_p_to_b,			// map from composite index ab_p to the only b holding non-zero value (contraction of the sum along b)
@@ -416,8 +416,8 @@ void forward_stage_one_cuda(
 		torch::Tensor ab_p_to_b,
 		const uint32_t l_in_max_net
 ){
-    const uint32_t ab_p_size = ab_p_to_a.size(0);
-    const uint32_t a_size    = features.size(0);
+    const uint32_t ab_p_size = ab_p_to_b.size(0);
+    const uint32_t a_size    = F.size(1);
 
           T*        const __restrict__ output_ptr              = output.data_ptr<T>();
     const T*        const __restrict__ W_ptr                   = W.data_ptr<T>();
@@ -426,15 +426,15 @@ void forward_stage_one_cuda(
     const T*        const __restrict__ Y_ptr                   = Y.data_ptr<T>();
     const T*        const __restrict__ R_ptr                   = R.data_ptr<T>();
     const T*        const __restrict__ radii_ptr               = radii.data_ptr<T>();
-    const uint32_t* const __restrict__ L_out_list_ptr          = L_out_list.data_ptr<T>();
-    const uint32_t* const __restrict__ L_in_list_ptr           = L_in_list.data_ptr<T>();
-    const uint32_t* const __restrict__ u_sizes_ptr             = u_sizes.data_ptr<T>();
-    const uint32_t* const __restrict__ v_sizes_ptr             = v_sizes.data_ptr<T>();
-    const uint32_t* const __restrict__ output_base_offsets_ptr = output_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ C_offsets_ptr           = C_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ F_base_offsets_ptr      = F_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ R_base_offsets_ptr      = R_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ ab_p_to_b_ptr           = ab_p_to_b.data_ptr<T>();
+    const uint32_t* const __restrict__ L_out_list_ptr          = L_out_list.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ L_in_list_ptr           = L_in_list.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ u_sizes_ptr             = u_sizes.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ v_sizes_ptr             = v_sizes.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ output_base_offsets_ptr = output_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ C_offsets_ptr           = C_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ F_base_offsets_ptr      = F_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ R_base_offsets_ptr      = R_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ ab_p_to_b_ptr           = ab_p_to_b.data_ptr<uint32_t>();
 
     dim3 blocks(L_out_list.size(0), L_in_list.size(0));
 
@@ -467,7 +467,7 @@ void backward_F_stage_one_cuda(
 		const uint32_t l_in_max_net
 ){
     const uint32_t ab_p_size = ab_p_to_a.size(0);
-    const uint32_t a_size    = features.size(0);
+    const uint32_t a_size    = G.size(1);
 
           T*        const __restrict__ output_ptr              = output.data_ptr<T>();
     const T*        const __restrict__ W_ptr                   = W.data_ptr<T>();
@@ -476,22 +476,22 @@ void backward_F_stage_one_cuda(
     const T*        const __restrict__ Y_ptr                   = Y.data_ptr<T>();
     const T*        const __restrict__ R_ptr                   = R.data_ptr<T>();
     const T*        const __restrict__ radii_ptr               = radii.data_ptr<T>();
-    const uint32_t* const __restrict__ L_out_list_ptr          = L_out_list.data_ptr<T>();
-    const uint32_t* const __restrict__ L_in_list_ptr           = L_in_list.data_ptr<T>();
-    const uint32_t* const __restrict__ u_sizes_ptr             = u_sizes.data_ptr<T>();
-    const uint32_t* const __restrict__ v_sizes_ptr             = v_sizes.data_ptr<T>();
-    const uint32_t* const __restrict__ output_base_offsets_ptr = output_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ C_offsets_ptr           = C_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ G_base_offsets_ptr      = G_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ R_base_offsets_ptr      = R_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ ab_p_to_b_ptr           = ab_p_to_b.data_ptr<T>();
+    const uint32_t* const __restrict__ L_out_list_ptr          = L_out_list.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ L_in_list_ptr           = L_in_list.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ u_sizes_ptr             = u_sizes.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ v_sizes_ptr             = v_sizes.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ output_base_offsets_ptr = output_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ C_offsets_ptr           = C_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ G_base_offsets_ptr      = G_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ R_base_offsets_ptr      = R_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ ab_p_to_a_ptr           = ab_p_to_a.data_ptr<uint32_t>();
 
     dim3 blocks(L_out_list.size(0), L_in_list.size(0));
 
     backward_F_stage_one_parent_cuda_kernel<T><<<blocks, 1>>>(output_ptr, W_ptr, C_ptr, G_ptr, Y_ptr, R_ptr, radii_ptr,
                                                               L_out_list_ptr, L_in_list_ptr, u_sizes_ptr, v_sizes_ptr,
                                                               output_base_offsets_ptr, C_offsets_ptr, G_base_offsets_ptr, R_base_offsets_ptr,
-                                                              ab_p_to_b_ptr,
+                                                              ab_p_to_a_ptr,
                                                               ab_p_size, a_size, l_in_max_net);
 }
 
@@ -510,15 +510,15 @@ void backward_R_cuda(
 		torch::Tensor u_sizes,				// layer specific, stored in Hub
 		torch::Tensor v_sizes,				// layer specific, stored in Hub
 		torch::Tensor output_base_offsets,	// network wide, stored in Hub
-		torch::Tensor G_base_offsets,		// layer specific, stored in Hub
 		torch::Tensor C_offsets,			// network wide, stored in Hub
+		torch::Tensor G_base_offsets,		// layer specific, stored in Hub
 		torch::Tensor F_base_offsets, 		// layer specific, stored in Hub
 		torch::Tensor ab_p_to_a,			// network wide, stored in Hub
 		torch::Tensor ab_p_to_b,			// network wide, stored in Hub
 		const uint32_t l_in_max_net			// network wide, stored in Hub
 ) {
     const uint32_t ab_p_size = ab_p_to_a.size(0);
-    const uint32_t a_size    = features.size(0);
+    const uint32_t a_size    = F.size(1);
 
           T*        const __restrict__ output_ptr              = output.data_ptr<T>();
     const T*        const __restrict__ W_ptr                   = W.data_ptr<T>();
@@ -527,22 +527,22 @@ void backward_R_cuda(
     const T*        const __restrict__ F_ptr                   = F.data_ptr<T>();
     const T*        const __restrict__ Y_ptr                   = Y.data_ptr<T>();
     const T*        const __restrict__ radii_ptr               = radii.data_ptr<T>();
-    const uint32_t* const __restrict__ L_out_list_ptr          = L_out_list.data_ptr<T>();
-    const uint32_t* const __restrict__ L_in_list_ptr           = L_in_list.data_ptr<T>();
-    const uint32_t* const __restrict__ u_sizes_ptr             = u_sizes.data_ptr<T>();
-    const uint32_t* const __restrict__ v_sizes_ptr             = v_sizes.data_ptr<T>();
-    const uint32_t* const __restrict__ output_base_offsets_ptr = output_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ G_base_offsets_ptr      = G_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ C_offsets_ptr           = C_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ F_base_offsets_ptr      = F_base_offsets.data_ptr<T>();
-    const uint32_t* const __restrict__ ab_p_to_a_ptr           = ab_p_to_a.data_ptr<T>();
-    const uint32_t* const __restrict__ ab_p_to_b_ptr           = ab_p_to_b.data_ptr<T>();
+    const uint32_t* const __restrict__ L_out_list_ptr          = L_out_list.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ L_in_list_ptr           = L_in_list.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ u_sizes_ptr             = u_sizes.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ v_sizes_ptr             = v_sizes.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ output_base_offsets_ptr = output_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ C_offsets_ptr           = C_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ G_base_offsets_ptr      = G_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ F_base_offsets_ptr      = F_base_offsets.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ ab_p_to_a_ptr           = ab_p_to_a.data_ptr<uint32_t>();
+    const uint32_t* const __restrict__ ab_p_to_b_ptr           = ab_p_to_b.data_ptr<uint32_t>();
 
     dim3 blocks(L_out_list.size(0), L_in_list.size(0));
 
-    backward_R_parent_cuda_kernel<T><<<blocks, 1>>>>(output_ptr, W_ptr, C_ptr, G_ptr, F_ptr, Y_ptr, radii_ptr,
-                                                     L_out_list_ptr, L_in_list_ptr, u_sizes_ptr, v_sizes_ptr,
-                                                     output_base_offsets_ptr, G_base_offsets_ptr, C_offsets_ptr, F_base_offsets_ptr,
-                                                     ab_p_to_a_ptr, ab_p_to_b_ptr,
-                                                     ab_p_size, a_size, l_in_max_net);
+    backward_R_parent_cuda_kernel<T><<<blocks, 1>>>(output_ptr, W_ptr, C_ptr, G_ptr, F_ptr, Y_ptr, radii_ptr,
+                                                    L_out_list_ptr, L_in_list_ptr, u_sizes_ptr, v_sizes_ptr,
+                                                    output_base_offsets_ptr, C_offsets_ptr, G_base_offsets_ptr, F_base_offsets_ptr,
+                                                    ab_p_to_a_ptr, ab_p_to_b_ptr,
+                                                    ab_p_size, a_size, l_in_max_net);
 }

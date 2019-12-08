@@ -18,7 +18,12 @@ elif torch.cuda.is_available() and CUDA_HOME is not None:
                       sources=['src/real_spherical_harmonics/rsh_bind.cpp',
                                'src/real_spherical_harmonics/rsh_cuda.cu'],
                       extra_compile_args={'cxx': ['-std=c++14'],
-                                          'nvcc': ['-std=c++14']})
+                                          'nvcc': ['-std=c++14']}),
+        CUDAExtension('se3cnn.pconv_with_kernel',
+                      sources=['src/pconv_with_kernel/bind.cpp',
+                               'src/pconv_with_kernel/cuda.cu'],
+                      extra_compile_args={'cxx': ['-std=c++14'],
+                                          'nvcc': ['-std=c++14', '-rdc=true']})
     ]
 else:
     # GPU is available, but CUDA_HOME is None
