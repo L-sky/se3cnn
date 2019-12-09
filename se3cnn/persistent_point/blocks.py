@@ -9,6 +9,7 @@ from se3cnn.SO3 import clebsch_gordan
 
 if torch.cuda.is_available():
     from se3cnn import real_spherical_harmonics
+    from se3cnn import pconv_with_kernel
 
 
 class DataHub(nn.Module):
@@ -44,7 +45,7 @@ class DataHub(nn.Module):
         self.rsh_norm_coefficients = None                           # 'sign' normalization for Spherical harmonics
 
         # jump points for C++/CUDA - calculate once (init)
-        self.output_base_offsets = []
+        self.R_base_offsets = []
         self.grad_base_offsets = []
         self.cg_base_offsets = []
         self.features_base_offsets = []
@@ -146,20 +147,19 @@ class DataHub(nn.Module):
     def calculate_offsets(self):
         from itertools import accumulate
         for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
-            tmp_output_base_offset = list(accumulate([mul_out * mul_in * (2 * min(l_out, l_in) + 1) for (mul_out, l_out, _) in Rs_out for (mul_in, l_in, _) in Rs_in]))
+            tmp_R_base_offset = list(accumulate([mul_out * mul_in * (2 * min(l_out, l_in) + 1) for (mul_out, l_out, _) in Rs_out for (mul_in, l_in, _) in Rs_in]))
             tmp_grad_base_offset = list(accumulate(mul_out * (2 * l_out + 1) for mul_out, l_out, _ in Rs_out))
             tmp_features_base_offset = list(accumulate(mul_in * (2 * l_in + 1) for mul_in, l_in, _ in Rs_in))
 
-            tmp_output_base_offset.insert(0, 0)
+            tmp_R_base_offset.insert(0, 0)
             tmp_grad_base_offset.insert(0, 0)
             tmp_features_base_offset.insert(0, 0)
 
-            self.output_base_offsets.append(torch.tensor(tmp_output_base_offset, dtype=torch.int32, device=self.device))
+            self.R_base_offsets.append(torch.tensor(tmp_R_base_offset, dtype=torch.int32, device=self.device))
             self.grad_base_offsets.append(torch.tensor(tmp_grad_base_offset, dtype=torch.int32, device=self.device))
             self.features_base_offsets.append(torch.tensor(tmp_features_base_offset, dtype=torch.int32, device=self.device))
 
     def forward(self, radii_vectors, ab_p_to_a, ab_p_to_b):
-        # TODO: now is bs_list is pre-calculated, needed ab_p_to_a and ab_p_to_b, which is sort of inverse map (?)
         # calculate absolute distances
         self.radii = radii_vectors.norm(p=2, dim=-1)
 
@@ -173,7 +173,113 @@ class DataHub(nn.Module):
         self.map_ab_p_to_b = ab_p_to_b
 
 
-class EQNetwork(torch.nn.Module):
+class PeriodicConvolutionWithKernel(nn.Module):
+    def __init__(self, data_hub, number_of_the_layer):
+        super().__init__()
+        self.data_hub = data_hub
+        self.n = number_of_the_layer
+
+    def forward(self, features, radial_basis_function_coefficients):
+        PeriodicConvolutionWithKernelFunction.apply(features, radial_basis_function_coefficients, self.data_hub, self.n)
+
+
+class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, features, radial_basis_function_coefficients, data_hub, n):
+        W = data_hub.norm_coef_list[n]
+        C = data_hub.cg
+        F = features
+        Y = data_hub.Ys
+        R = radial_basis_function_coefficients
+        radii = data_hub.radii
+        L_out_list = data_hub.l_out_list[n]
+        L_in_list = data_hub.l_in_list[n]
+        u_sizes = data_hub.mul_out_list[n]
+        v_sizes = data_hub.mul_in_list[n]
+        output_base_offsets = data_hub.grad_base_offsets[n]
+        C_offsets = data_hub.cg_base_offsets
+        F_base_offsets = data_hub.features_base_offsets[n]
+        R_base_offsets = data_hub.R_base_offsets[n]
+        ab_p_to_a = data_hub.map_ab_p_to_a
+        ab_p_to_b = data_hub.map_ab_p_to_b
+        l_in_max_net = data_hub.max_l_in
+
+        R.transpose_(0, 1)
+        F.transpose_(0, 1)
+
+        B = pconv_with_kernel.forward_stage_one(W, C, F, Y, R, radii,
+                                                L_out_list, L_in_list, u_sizes, v_sizes,
+                                                output_base_offsets, C_offsets, F_base_offsets, R_base_offsets,
+                                                ab_p_to_b, l_in_max_net)
+
+        B.transpose_(0, 1)
+        F_next = B.new_zeros((F.shape[1], B.shape[1]))
+        F_next.index_add_(dim=0, index=ab_p_to_a, source=B)
+        del B
+
+        # TODO: make it more granular (?)
+        if F.requires_grad or R.requires_grad:
+            ctx.save_for_backward(F, R)             # transposed
+            ctx.data_hub = data_hub
+            ctx.n = n
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        F_grad = None
+        R_grad = None
+
+        G = grad_output
+        F, R = ctx.saved_variables                  # transposed
+        data_hub = ctx.data_hub
+        n = ctx.n
+
+        W = data_hub.norm_coef_list[n]
+        C = data_hub.cg
+        # F
+        Y = data_hub.Ys
+        # R
+        radii = data_hub.radii
+        L_out_list = data_hub.l_out_list[n]
+        L_in_list = data_hub.l_in_list[n]
+        u_sizes = data_hub.mul_out_list[n]
+        v_sizes = data_hub.mul_in_list[n]
+        output_base_offsets = data_hub.grad_base_offsets[n]
+        C_offsets = data_hub.cg_base_offsets
+        F_base_offsets = data_hub.features_base_offsets[n]
+        G_base_offsets = data_hub.grad_base_offsets[n]
+        R_base_offsets = data_hub.R_base_offsets[n]
+        ab_p_to_a = data_hub.map_ab_p_to_a
+        ab_p_to_b = data_hub.map_ab_p_to_b
+        l_in_max_net = data_hub.max_l_in
+
+        G.transpose_(0, 1)
+
+        if F.requires_grad:
+            B_grad = pconv_with_kernel.backward_F_stage_one(W, C, G, Y, R, radii,
+                                                            L_out_list, L_in_list, u_sizes, v_sizes,
+                                                            output_base_offsets, C_offsets, G_base_offsets, R_base_offsets,
+                                                            ab_p_to_a,
+                                                            l_in_max_net)
+            B_grad.transpose_(0, 1)
+            F_grad = B_grad.new_zeros((grad_output.shape[0], B_grad.shape[1]))
+            F_grad.index_add_(dim=0, index=ab_p_to_b, source=B_grad)
+            del B_grad
+
+        if R.requires_grad:
+            R_grad = pconv_with_kernel.backward_R(W, C, G, F, Y, radii,
+                                                  L_out_list, L_in_list, u_sizes, v_sizes,
+                                                  output_base_offsets, C_offsets, G_base_offsets, F_base_offsets,
+                                                  ab_p_to_a, ab_p_to_b,
+                                                  l_in_max_net)
+            R_grad.transpose_(0, 1)
+
+        del ctx.data_hub, ctx.n
+        del ctx
+
+        return F_grad, R_grad, None, None
+
+
+class EQNetwork(nn.Module):
     def __init__(self, representations, max_radius):
         super().__init__()
 
