@@ -53,6 +53,7 @@ class DataHub(nn.Module):
         # tied to input - recalculate on each forward call
         self.Ys = None                                              # Spherical harmonics
         self.radii = None                                           # Absolute distances
+        self.n_norm = None
         self.map_ab_p_to_a = None
         self.map_ab_p_to_b = None
 
@@ -159,7 +160,7 @@ class DataHub(nn.Module):
             self.grad_base_offsets.append(torch.tensor(tmp_grad_base_offset, dtype=torch.int32, device=self.device))
             self.features_base_offsets.append(torch.tensor(tmp_features_base_offset, dtype=torch.int32, device=self.device))
 
-    def forward(self, radii_vectors, ab_p_to_a, ab_p_to_b):
+    def forward(self, radii_vectors, n_norm, ab_p_to_a, ab_p_to_b):
         # calculate absolute distances
         self.radii = radii_vectors.norm(p=2, dim=-1)
 
@@ -167,6 +168,9 @@ class DataHub(nn.Module):
         self.Ys = radii_vectors.new_empty(((self.max_l + 1) * (self.max_l + 1), radii_vectors.size(0)))  # [filters, batch_size]
         real_spherical_harmonics.rsh(self.Ys, radii_vectors / self.radii.clamp_min(1e-12).unsqueze(1).expand_as(radii_vectors))
         self.Ys.mul_(self.rsh_norm_coefficients)
+
+        # assign input size based normalization coefficients
+        self.n_norm = n_norm
 
         # assign inverse maps
         self.map_ab_p_to_a = ab_p_to_a
@@ -204,6 +208,8 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         ab_p_to_b = data_hub.map_ab_p_to_b
         l_in_max_net = data_hub.max_l_in
 
+        n_norm = data_hub.n_norm
+
         R.transpose_(0, 1)
         F.transpose_(0, 1)
 
@@ -215,6 +221,7 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         B.transpose_(0, 1)
         F_next = B.new_zeros((F.shape[1], B.shape[1]))
         F_next.index_add_(dim=0, index=ab_p_to_a, source=B)
+        F_next.mul_(n_norm.unsqueeze(1).expand_as(F_next))
         del B
 
         # TODO: make it more granular (?)
@@ -252,6 +259,9 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         ab_p_to_b = data_hub.map_ab_p_to_b
         l_in_max_net = data_hub.max_l_in
 
+        n_norm = data_hub.n_norm
+
+        G.mul_(n_norm.unsqueeze(1).expand_as(G))
         G.transpose_(0, 1)
 
         if F.requires_grad:
