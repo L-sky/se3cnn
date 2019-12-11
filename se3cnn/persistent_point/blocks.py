@@ -206,7 +206,7 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         R_base_offsets = data_hub.R_base_offsets[n]
         ab_p_to_a = data_hub.map_ab_p_to_a
         ab_p_to_b = data_hub.map_ab_p_to_b
-        l_in_max_net = data_hub.max_l_in
+        l_in_max_net_bound = data_hub.max_l_in + 1
 
         n_norm = data_hub.n_norm
 
@@ -216,7 +216,7 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         B = pconv_with_kernel.forward_stage_one(W, C, F, Y, R, radii,
                                                 L_out_list, L_in_list, u_sizes, v_sizes,
                                                 output_base_offsets, C_offsets, F_base_offsets, R_base_offsets,
-                                                ab_p_to_b, l_in_max_net)
+                                                ab_p_to_b, l_in_max_net_bound)
 
         B.transpose_(0, 1)
         F_next = B.new_zeros((F.shape[1], B.shape[1]))
@@ -224,7 +224,6 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         F_next.mul_(n_norm.unsqueeze(1).expand_as(F_next))
         del B
 
-        # TODO: make it more granular (?)
         if F.requires_grad or R.requires_grad:
             ctx.save_for_backward(F, R)             # transposed
             ctx.data_hub = data_hub
@@ -257,7 +256,7 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         R_base_offsets = data_hub.R_base_offsets[n]
         ab_p_to_a = data_hub.map_ab_p_to_a
         ab_p_to_b = data_hub.map_ab_p_to_b
-        l_in_max_net = data_hub.max_l_in
+        l_in_max_net_bound = data_hub.max_l_in + 1
 
         n_norm = data_hub.n_norm
 
@@ -269,7 +268,7 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
                                                             L_out_list, L_in_list, u_sizes, v_sizes,
                                                             output_base_offsets, C_offsets, G_base_offsets, R_base_offsets,
                                                             ab_p_to_a,
-                                                            l_in_max_net)
+                                                            l_in_max_net_bound)
             B_grad.transpose_(0, 1)
             F_grad = B_grad.new_zeros((grad_output.shape[0], B_grad.shape[1]))
             F_grad.index_add_(dim=0, index=ab_p_to_b, source=B_grad)
@@ -280,7 +279,7 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
                                                   L_out_list, L_in_list, u_sizes, v_sizes,
                                                   output_base_offsets, C_offsets, G_base_offsets, F_base_offsets,
                                                   ab_p_to_a, ab_p_to_b,
-                                                  l_in_max_net)
+                                                  l_in_max_net_bound)
             R_grad.transpose_(0, 1)
 
         del ctx.data_hub, ctx.n

@@ -1,7 +1,9 @@
 # pylint: disable=not-callable, no-member, invalid-name, line-too-long, wildcard-import, unused-wildcard-import, missing-docstring
 from setuptools import setup, find_packages
 import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+from torch.utils.cpp_extension import CUDAExtension, CUDA_HOME
+
+from setup_helper import BuildRDCExtension
 
 # python setup.py develop    - if you wont to be able to execute from PyCharm (or similar IDE) - places .so file into se3cnn folder from which real_spherical_harmonics imports
 
@@ -20,10 +22,13 @@ elif torch.cuda.is_available() and CUDA_HOME is not None:
                       extra_compile_args={'cxx': ['-std=c++14'],
                                           'nvcc': ['-std=c++14']}),
         CUDAExtension('se3cnn.pconv_with_kernel',
-                      sources=['src/pconv_with_kernel/bind.cpp',
-                               'src/pconv_with_kernel/cuda.cu'],
-                      extra_compile_args={'cxx': ['-std=c++14'],
-                                          'nvcc': ['-std=c++14', '-rdc=true']})
+                      sources=[
+                               'src/pconv_with_kernel/link_pconv_cuda.cu',
+                               'src/pconv_with_kernel/pconv_cuda.cu',
+                               'src/pconv_with_kernel/pconv_bind.cpp'],
+                      extra_compile_args={'nvcc': ['-std=c++14', '-rdc=true', '-lcudadevrt'],
+                                          'cxx': ['-std=c++14']},
+                      libraries=['cudadevrt'])
     ]
 else:
     # GPU is available, but CUDA_HOME is None
@@ -44,6 +49,6 @@ setup(
         "Operating System :: OS Independent",
     ],
     ext_modules=ext_modules,
-    cmdclass={'build_ext': BuildExtension},
+    cmdclass={'build_ext': BuildRDCExtension},
     packages=find_packages(),
 )
