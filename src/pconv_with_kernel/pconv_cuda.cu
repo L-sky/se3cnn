@@ -122,7 +122,7 @@ __global__ void forward_stage_one_parent_cuda_kernel(
 	// add offsets
 		  T* const __restrict__ output_lout	    = output + (output_base_offsets[l_out_id] * ab_p_size);             // base offsets are the same as for gradients
 	const T* const __restrict__ W_lout_lin		= W + (l_out_id * l_in_size + l_in_id) * 2;
-	const T* const __restrict__ C_lout_lin		= C + C_offsets[l_out_id*l_in_max_net_bound + l_in_id];
+	const T* const __restrict__ C_lout_lin		= C + C_offsets[l_out*l_in_max_net_bound + l_in];
 	const T* const __restrict__ F_lin			= F + (F_base_offsets[l_in_id] * a_size);
 	const T* const __restrict__ R_lout_lin      = R + (R_base_offsets[l_out_id*l_in_size + l_in_id] * ab_p_size);
 
@@ -245,7 +245,7 @@ __global__ void backward_F_stage_one_parent_cuda_kernel(
 	// add offsets
 		  T* const __restrict__ output_lin	    = output + (output_base_offsets[l_in_id] * ab_p_size);             // base offsets are the same as for features
 	const T* const __restrict__ W_lout_lin		= W + (l_out_id * l_in_size + l_in_id) * 2;
-	const T* const __restrict__ C_lout_lin		= C + C_offsets[l_out_id*l_in_max_net_bound + l_in_id];
+	const T* const __restrict__ C_lout_lin		= C + C_offsets[l_out*l_in_max_net_bound + l_in];
 	const T* const __restrict__ G_lout			= G + (G_base_offsets[l_out_id] * a_size);
 	const T* const __restrict__ R_lout_lin      = R + (R_base_offsets[l_out_id*l_in_size + l_in_id] * ab_p_size);
 
@@ -294,8 +294,8 @@ __global__ void backward_F_stage_one_child_cuda_kernel(
 
 	// deduce individual indices
 	const uint32_t v	= vjab_p / (j_size * ab_p_size);
-	const uint32_t j 	= (vjab_p - v * i_size * ab_p_size) / ab_p_size;
-	const uint32_t ab_p = vjab_p - v * i_size * ab_p_size - j * ab_p_size;
+	const uint32_t j 	= (vjab_p - v * j_size * ab_p_size) / ab_p_size;
+	const uint32_t ab_p = vjab_p - v * j_size * ab_p_size - j * ab_p_size;
 	const uint32_t a 	= ab_p_to_a[ab_p];
 
 	const T norm = W_lout_lin_r_nonzero + (T) (radii[ab_p] != 0.) * (W_lout_lin_r_zero - W_lout_lin_r_nonzero);
@@ -342,7 +342,7 @@ __global__ void backward_R_parent_cuda_kernel(
 		const uint32_t* const __restrict__ ab_p_to_b,			// map from composite index ab_p to the only b holding non-zero value (contraction of the sum along b)
 		const uint32_t					   ab_p_size,			// total number of pairs point-neighbor
 		const uint32_t					   a_size,				// number of points (atoms)
-		const uint32_t 					   l_in_max_net_bound			// maximal value of l_in that is present in C (for selecting offset)
+		const uint32_t 					   l_in_max_net_bound	// maximal value of l_in that is present in C (for selecting offset)
 ) {
 	const uint32_t l_out_id  = blockIdx.x;
 	const uint32_t l_in_id 	 = blockIdx.y;
@@ -368,7 +368,7 @@ __global__ void backward_R_parent_cuda_kernel(
 	// add offsets
 		  T* const __restrict__ output_lout_lin	= output + (output_base_offsets[l_out_id*l_in_size + l_in_id] * ab_p_size); // base offsets are the same as for R
 	const T* const __restrict__ W_lout_lin		= W + (l_out_id * l_in_size + l_in_id) * 2;
-	const T* const __restrict__ C_lout_lin		= C + C_offsets[l_out_id*l_in_max_net_bound + l_in_id];
+	const T* const __restrict__ C_lout_lin		= C + C_offsets[l_out*l_in_max_net_bound + l_in];
 	const T* const __restrict__ G_lout			= G + (G_base_offsets[l_out_id] * a_size);
 	const T* const __restrict__ F_lin			= F + (F_base_offsets[l_in_id] * a_size);
 

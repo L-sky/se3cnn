@@ -166,7 +166,7 @@ class DataHub(nn.Module):
 
         # calculate Spherical harmonics
         self.Ys = radii_vectors.new_empty(((self.max_l + 1) * (self.max_l + 1), radii_vectors.size(0)))  # [filters, batch_size]
-        real_spherical_harmonics.rsh(self.Ys, radii_vectors / self.radii.clamp_min(1e-12).unsqueze(1).expand_as(radii_vectors))
+        real_spherical_harmonics.rsh(self.Ys, radii_vectors / self.radii.clamp_min(1e-12).unsqueeze(1).expand_as(radii_vectors))
         self.Ys.mul_(self.rsh_norm_coefficients)
 
         # assign input size based normalization coefficients
@@ -184,7 +184,7 @@ class PeriodicConvolutionWithKernel(nn.Module):
         self.n = number_of_the_layer
 
     def forward(self, features, radial_basis_function_coefficients):
-        PeriodicConvolutionWithKernelFunction.apply(features, radial_basis_function_coefficients, self.data_hub, self.n)
+        return PeriodicConvolutionWithKernelFunction.apply(features, radial_basis_function_coefficients, self.data_hub, self.n)
 
 
 class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
@@ -210,29 +210,32 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
 
         n_norm = data_hub.n_norm
 
-        R.transpose_(0, 1)
-        F.transpose_(0, 1)
+        R = R.transpose_(0, 1).contiguous()
+        F = F.transpose_(0, 1).contiguous()
 
         B = pconv_with_kernel.forward_stage_one(W, C, F, Y, R, radii,
                                                 L_out_list, L_in_list, u_sizes, v_sizes,
                                                 output_base_offsets, C_offsets, F_base_offsets, R_base_offsets,
                                                 ab_p_to_b, l_in_max_net_bound)
 
-        B.transpose_(0, 1)
+        B = B.transpose_(0, 1).contiguous()
         F_next = B.new_zeros((F.shape[1], B.shape[1]))
-        F_next.index_add_(dim=0, index=ab_p_to_a, source=B)
+        F_next.index_add_(dim=0, index=ab_p_to_a.type(torch.long), source=B)
         F_next.mul_(n_norm.unsqueeze(1).expand_as(F_next))
         del B
 
-        if F.requires_grad or R.requires_grad:
+        if features.requires_grad or radial_basis_function_coefficients.requires_grad:
             ctx.save_for_backward(F, R)             # transposed
             ctx.data_hub = data_hub
             ctx.n = n
 
+        return F_next
+
+
     @staticmethod
     def backward(ctx, grad_output):
-        F_grad = None
-        R_grad = None
+        #F_grad = None
+        #R_grad = None
 
         G = grad_output
         F, R = ctx.saved_variables                  # transposed
@@ -249,7 +252,7 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         L_in_list = data_hub.l_in_list[n]
         u_sizes = data_hub.mul_out_list[n]
         v_sizes = data_hub.mul_in_list[n]
-        output_base_offsets = data_hub.grad_base_offsets[n]
+        # output_base_offsets = data_hub.grad_base_offsets[n]
         C_offsets = data_hub.cg_base_offsets
         F_base_offsets = data_hub.features_base_offsets[n]
         G_base_offsets = data_hub.grad_base_offsets[n]
@@ -261,26 +264,24 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         n_norm = data_hub.n_norm
 
         G.mul_(n_norm.unsqueeze(1).expand_as(G))
-        G.transpose_(0, 1)
+        G = G.transpose_(0, 1).contiguous()
 
-        if F.requires_grad:
-            B_grad = pconv_with_kernel.backward_F_stage_one(W, C, G, Y, R, radii,
-                                                            L_out_list, L_in_list, u_sizes, v_sizes,
-                                                            output_base_offsets, C_offsets, G_base_offsets, R_base_offsets,
-                                                            ab_p_to_a,
-                                                            l_in_max_net_bound)
-            B_grad.transpose_(0, 1)
-            F_grad = B_grad.new_zeros((grad_output.shape[0], B_grad.shape[1]))
-            F_grad.index_add_(dim=0, index=ab_p_to_b, source=B_grad)
-            del B_grad
+        B_grad = pconv_with_kernel.backward_F_stage_one(W, C, G, Y, R, radii,
+                                                        L_out_list, L_in_list, u_sizes, v_sizes,
+                                                        F_base_offsets, C_offsets, G_base_offsets, R_base_offsets,
+                                                        ab_p_to_a,
+                                                        l_in_max_net_bound)
+        B_grad = B_grad.transpose_(0, 1).contiguous()
+        F_grad = B_grad.new_zeros((grad_output.shape[1], B_grad.shape[1]))
+        F_grad.index_add_(dim=0, index=ab_p_to_b.type(torch.long), source=B_grad)
+        del B_grad
 
-        if R.requires_grad:
-            R_grad = pconv_with_kernel.backward_R(W, C, G, F, Y, radii,
-                                                  L_out_list, L_in_list, u_sizes, v_sizes,
-                                                  output_base_offsets, C_offsets, G_base_offsets, F_base_offsets,
-                                                  ab_p_to_a, ab_p_to_b,
-                                                  l_in_max_net_bound)
-            R_grad.transpose_(0, 1)
+        R_grad = pconv_with_kernel.backward_R(W, C, G, F, Y, radii,
+                                              L_out_list, L_in_list, u_sizes, v_sizes,
+                                              R_base_offsets, C_offsets, G_base_offsets, F_base_offsets,
+                                              ab_p_to_a, ab_p_to_b,
+                                              l_in_max_net_bound)
+        R_grad = R_grad.transpose_(0, 1).contiguous()
 
         del ctx.data_hub, ctx.n
         del ctx

@@ -156,6 +156,9 @@ torch::Tensor backward_F_stage_one(
 
     torch::Tensor output = torch::zeros({lin_vj_size, ab_p_size}, W.options());   // |(l_in, v, j), (ab_p)|
 
+    // TODO: check if output created
+    printf("%f", output[0][0].item<double>());
+
     backward_F_stage_one_cuda(output, W, C, G, Y, R, radii,
                               L_out_list, L_in_list, u_sizes, v_sizes,
                               output_base_offsets, C_offsets, G_base_offsets, R_base_offsets,

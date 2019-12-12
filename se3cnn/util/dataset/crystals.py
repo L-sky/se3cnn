@@ -237,8 +237,7 @@ class CrystalCIF_v2(Dataset):
                      or not isfile(join(preprocessed_radius_dir, 'map_ab_p_to_a.pth'))
                      or not isfile(join(preprocessed_radius_dir, 'map_ab_p_to_b.pth'))
                      or not isfile(join(preprocessed_radius_dir, 'n_norm.pth'))
-                     or not isfile(join(preprocessed_radius_dir, 'ab_p_partitions.pth'))
-                     or not isfile(join(preprocessed_radius_dir, 'a_partitions.pth')))
+                     or not isfile(join(preprocessed_radius_dir, 'ab_p_partitions.pth')))
         ):
             rmtree(preprocessed_radius_dir)
             CrystalCIF_v2.preprocess(root, max_radius)
@@ -252,13 +251,14 @@ class CrystalCIF_v2(Dataset):
         self.geometries = torch.load(join(preprocessed_dir, 'geometries.pth'))
         self.atomic_charges = torch.load(join(preprocessed_dir, 'atomic_charges.pth'))
         self.lattice_params = torch.load(join(preprocessed_dir, 'lattice_params.pth'))
+        self.a_partitions = torch.load(join(preprocessed_dir, 'a_partitions.pth'))
 
         self.radii = torch.load(join(preprocessed_radius_dir, 'radii.pth'))
         self.map_ab_p_to_a = torch.load(join(preprocessed_radius_dir, 'map_ab_p_to_a.pth'))
         self.map_ab_p_to_b = torch.load(join(preprocessed_radius_dir, 'map_ab_p_to_b.pth'))
         self.n_norm = torch.load(join(preprocessed_radius_dir, 'n_norm.pth'))
         self.ab_p_partitions = torch.load(join(preprocessed_radius_dir, 'ab_p_partitions.pth'))
-        self.a_partitions = torch.load(join(preprocessed_radius_dir, 'a_partitions.pth'))
+
 
         if material_properties:
             self.properties = torch.stack([torch.load(join(root, property_path)) for property_path in material_properties], dim=1)
@@ -378,7 +378,8 @@ class CrystalCIF_v2(Dataset):
         torch.save(site_a_coords_list, join(preprocessed_dir, 'geometries.pth'))                    # list of z tensors [a_i, 3]            - xyz
         torch.save(atomic_charges, join(preprocessed_dir, 'atomic_charges.pth'))
         torch.save(lattice_params, join(preprocessed_dir, 'lattice_params.pth'))                    # [z, 6]                                - xyz and angles (in degrees)
-        del site_a_coords_list, atomic_charges, lattice_params
+        torch.save(a_partitions, join(preprocessed_dir, 'a_partitions.pth'))                        # tensor [n_structures, 2]              - start/end of a_slice
+        del site_a_coords_list, atomic_charges, lattice_params, a_partitions
 
         if max_radius:
             torch.save(map_ab_p_to_a, join(max_radius_dir, 'map_ab_p_to_a.pth'))                    # tensor [sum(r_i)]
@@ -395,7 +396,4 @@ class CrystalCIF_v2(Dataset):
 
             torch.save(ab_p_partitions, join(max_radius_dir, 'ab_p_partitions.pth'))                # tensor [z, 2]                         - start/end of ab_p slices
             del ab_p_partitions
-
-            torch.save(a_partitions, join(max_radius_dir, 'a_partitions.pth'))                      # tensor [n_structures, 2]              - start/end of a_slice
-            del a_partitions
         # endregion
