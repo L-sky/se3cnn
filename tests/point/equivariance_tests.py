@@ -48,15 +48,15 @@ class Tests(unittest.TestCase):
             Rs_out = [(2, 0), (2, 1), (2, 2)]
 
             k = Kernel(Rs_in, Rs_out, ConstantRadialModel)
-            r = torch.randn(3)
+            r = torch.randn((10, 3))
 
             abc = torch.randn(3)
             D_in = direct_sum(*[irr_repr(l, *abc) for mul, l in Rs_in for _ in range(mul)])
             D_out = direct_sum(*[irr_repr(l, *abc) for mul, l in Rs_out for _ in range(mul)])
 
-
             W1 = D_out @ k(r)  # [i, j]
-            W2 = k(rot(*abc) @ r) @ D_in  # [i, j]
+            # W2 = k(rot(*abc) @ r) @ D_in  # [i, j]
+            W2 = k(r @ rot(*abc).t()) @ D_in
             self.assertLess((W1 - W2).norm(), 10e-5 * W1.norm())
 
 
