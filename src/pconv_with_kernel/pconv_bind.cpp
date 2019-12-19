@@ -106,7 +106,7 @@ torch::Tensor forward_stage_one(
     const uint32_t lout_ui_size = (uint32_t) output_base_offsets[output_base_offsets.size(0)-1].item<int32_t>();
     const uint32_t ab_p_size = (uint32_t) ab_p_to_b.size(0);
 
-    torch::Tensor output = torch::zeros({lout_ui_size, ab_p_size}, W.options()); // |(l_out, u, i), (a, b_p)|
+    torch::Tensor output = torch::zeros({lout_ui_size, ab_p_size}, W.options()); // |(l_out, u, i), (a, b')|
 
     forward_stage_one_cuda(output, W, C, F, Y, R, radii,
                            L_out_list, L_in_list, u_sizes, v_sizes,
@@ -155,9 +155,6 @@ torch::Tensor backward_F_stage_one(
     const uint32_t ab_p_size = (uint32_t) ab_p_to_a.size(0);
 
     torch::Tensor output = torch::zeros({lin_vj_size, ab_p_size}, W.options());   // |(l_in, v, j), (ab_p)|
-
-    // TODO: check if output created
-    printf("%f", output[0][0].item<double>());
 
     backward_F_stage_one_cuda(output, W, C, G, Y, R, radii,
                               L_out_list, L_in_list, u_sizes, v_sizes,

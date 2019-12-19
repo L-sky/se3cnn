@@ -176,7 +176,7 @@ __global__ void forward_stage_one_child_cuda_kernel(
 	const uint32_t ab_p = uiab_p - u * i_size * ab_p_size - i * ab_p_size;
 	const uint32_t b 	= ab_p_to_b[ab_p];                                      // Note: b is not b_p, it is an index of the only corresponding non-zero entry
 
-	const T norm = W_lout_lin_r_nonzero + (T) (radii[ab_p] != 0.) * (W_lout_lin_r_zero - W_lout_lin_r_nonzero);
+	const T norm = W_lout_lin_r_nonzero + (T) (radii[ab_p] == 0.) * (W_lout_lin_r_zero - W_lout_lin_r_nonzero);
 
 	T output_lout_u_i_ab_p_addendum = 0;
 
@@ -188,7 +188,7 @@ __global__ void forward_stage_one_child_cuda_kernel(
 	                output_lout_u_i_ab_p_addendum +=
 	                    C_lout_lin[(l_f*l_f - l_min*l_min)*i_size*j_size + i*j_size*m_size + j*m_size + m] *
 	                    F_lin[v*j_size*a_size + j*a_size + b] *
-	                    Y[l_f*l_f*ab_p] *
+	                    Y[(l_f*l_f + m)*ab_p_size + ab_p] *
 	                    R_lout_lin[l_id*u_size*v_size*ab_p_size + u*v_size*ab_p_size + v*ab_p_size + ab_p];
 	            }
 	        }
@@ -298,7 +298,7 @@ __global__ void backward_F_stage_one_child_cuda_kernel(
 	const uint32_t ab_p = vjab_p - v * j_size * ab_p_size - j * ab_p_size;
 	const uint32_t a 	= ab_p_to_a[ab_p];
 
-	const T norm = W_lout_lin_r_nonzero + (T) (radii[ab_p] != 0.) * (W_lout_lin_r_zero - W_lout_lin_r_nonzero);
+	const T norm = W_lout_lin_r_nonzero + (T) (radii[ab_p] == 0.) * (W_lout_lin_r_zero - W_lout_lin_r_nonzero);
 
 	T output_lin_v_j_ab_p_addendum = 0;
 
@@ -310,7 +310,7 @@ __global__ void backward_F_stage_one_child_cuda_kernel(
 	                output_lin_v_j_ab_p_addendum +=
 	                    C_lout_lin[(l_f*l_f - l_min*l_min)*i_size*j_size + i*j_size*m_size + j*m_size + m] *
 	                    G_lout[u*i_size*a_size + i*a_size + a] *
-	                    Y[l_f*l_f*ab_p] *
+	                    Y[(l_f*l_f + m)*ab_p_size + ab_p] *
 	                    R_lout_lin[l_id*u_size*v_size*ab_p_size + u*v_size*ab_p_size + v*ab_p_size + ab_p];
 	            }
 	        }
@@ -424,7 +424,7 @@ __global__ void backward_R_child_cuda_kernel(
 	const uint32_t a    = ab_p_to_a[ab_p];
 	const uint32_t b 	= ab_p_to_b[ab_p];
 
-	const T norm = W_lout_lin_r_nonzero + (T) (radii[ab_p] != 0.) * (W_lout_lin_r_zero - W_lout_lin_r_nonzero);
+	const T norm = W_lout_lin_r_nonzero + (T) (radii[ab_p] == 0.) * (W_lout_lin_r_zero - W_lout_lin_r_nonzero);
 
 	// add offsets
 	const T* const __restrict__ C_lout_lin_l 	= C_lout_lin 	+ (i_size * j_size * (l_f*l_f - l_offset*l_offset)); 	// only valid L's, thus index is shifted
@@ -435,12 +435,16 @@ __global__ void backward_R_child_cuda_kernel(
 	// make additions (writes) to register
 	T output_lout_lin_l_uvab_p = 0;
 
-    size_t ijm = 0;
-	for (size_t i = 0; i < i_size; i++){
-		for (size_t j = 0; j < j_size; j++){
-			for (size_t m = 0; m < m_size; m++, ijm++){
+    uint32_t ijm = 0;
+	for (uint32_t i = 0; i < i_size; ++i){
+		for (uint32_t j = 0; j < j_size; ++j){
+			for (uint32_t m = 0; m < m_size; ++m, ++ijm){
 				// TODO: store repeating values on different levels to reduce number of calls to global memory
-				output_lout_lin_l_uvab_p += C_lout_lin_l[ijm] * G_lout_u[i*a_size + a] * F_lin_v[j*a_size + b] * Y_l[m*ab_p_size + ab_p];
+				output_lout_lin_l_uvab_p +=
+				    C_lout_lin_l[ijm] *
+				    G_lout_u[i*a_size + a] *
+				    F_lin_v[j*a_size + b] *
+				    Y_l[m*ab_p_size + ab_p];
 			}
 		}
 	}
