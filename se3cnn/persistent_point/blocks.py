@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
 
+# import numpy as np
+
 import math
 
-from se3cnn.non_linearities.rescaled_act import relu, sigmoid
-
 from se3cnn.SO3 import clebsch_gordan
+from se3cnn.point.radial import CosineBasisModel
 
 if torch.cuda.is_available():
     from se3cnn import real_spherical_harmonics
@@ -13,7 +14,7 @@ if torch.cuda.is_available():
 
 
 class DataHub(nn.Module):
-    def __init__(self, representations, r_cut, normalization='norm', device=torch.device('cuda:0')):
+    def __init__(self, representations, has_gates, normalization='norm', device=torch.device(type='cuda', index=0)):
         super().__init__()
         assert len(representations) > 1, "there should be at list two representations to form a network"
         self.representations = representations  # layer representations
@@ -25,8 +26,9 @@ class DataHub(nn.Module):
         # As it is, it will only support gpu, but it may still be useful to select which one of them to use
         self.device = device
 
-        # Network (fixed) properties
-        self.r_cut = r_cut
+        # presence of the gate affects number of filters
+        self.has_gates = has_gates
+        self.gates_count_list = []
 
         # Network properties - calculate once (init)
         self.max_l_out = None                                       # Max l_out in a network -> for Clebsch Gordan coefficients
@@ -70,8 +72,8 @@ class DataHub(nn.Module):
         for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
             # running values are need to make sure max_l is not higher that needed (consequent layers)
             # e.g, rotational orders: [4, 6, 4] -> 12 (without), but [4, 6, 4] -> 10 (with)
-            running_max_l_out = max([l_out for _, l_out, _ in Rs_out])
-            running_max_l_in = max([l_in for _, l_in, _ in Rs_in])
+            running_max_l_out = max([l_out for _, l_out in Rs_out])
+            running_max_l_in = max([l_in for _, l_in in Rs_in])
 
             max_l_out = max(running_max_l_out, max_l_out)
             max_l_in = max(running_max_l_in, max_l_in)
@@ -83,11 +85,25 @@ class DataHub(nn.Module):
         self.max_l = max_l
 
     def calculate_l_out_in_and_mul_out_in_lists(self):
-        for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
-            tmp_l_out_list = [l_out for _, l_out, _ in Rs_out]
-            tmp_l_in_list = [l_in for _, l_in, _ in Rs_in]
-            tmp_mul_out_list = [mul_out for mul_out, _, _ in Rs_out]
-            tmp_mul_in_list = [mul_in for mul_in, _, _ in Rs_in]
+        for Rs_in, Rs_out, has_gate in zip(self.representations[:-1], self.representations[1:], self.has_gates):
+            tmp_l_out_list = [l_out for _, l_out in Rs_out]
+            tmp_l_in_list = [l_in for _, l_in in Rs_in]
+            tmp_mul_out_list = [mul_out for mul_out, _ in Rs_out]
+            tmp_mul_in_list = [mul_in for mul_in, _ in Rs_in]
+
+            if has_gate:
+                gates_count = 0
+                if tmp_l_out_list[0] != 0:                                                  # expected sorted representations and consequently lists
+                    tmp_l_out_list = [0] + tmp_l_out_list
+                    gates_count = sum(tmp_mul_out_list)
+                    tmp_mul_out_list = tmp_mul_out_list + [gates_count]
+                elif len(tmp_l_out_list) > 1:                                               # not only scalars, so non-zero number of gates
+                    gates_count = sum(tmp_mul_out_list[1:])
+                    tmp_mul_out_list[0] += sum(tmp_mul_out_list[1:])
+
+                self.gates_count_list.append(gates_count)
+            else:
+                self.gates_count_list.append(0)
 
             # so annoying that there is no uint32 data type in PyTorch
             self.l_out_list.append(torch.tensor(tmp_l_out_list, dtype=torch.int32, device=self.device))
@@ -107,14 +123,13 @@ class DataHub(nn.Module):
                 lm_norm = math.sqrt(2 * l_out + 1) * math.sqrt(4 * math.pi)
             return lm_norm
 
-        for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
-            norm_coef = torch.zeros((len(Rs_out), len(Rs_in), 2), device=self.device)
-            for i, (_, l_out, _) in enumerate(Rs_out):
-                num_summed_elements = sum([mul_in * (2 * min(l_out, l_in) + 1) for mul_in, l_in, _ in Rs_in])  # (l_out + l_in) - |l_out - l_in| = 2*min(l_out, l_in)
-                for j, (mul_in, l_in, _) in enumerate(Rs_in):
+        for l_in_layer, mul_in_layer, l_out_layer, mul_out_layer in zip(self.l_in_list, self.mul_in_list, self.l_out_list, self.mul_out_list):
+            norm_coef = torch.zeros((len(l_out_layer), len(l_in_layer), 2), device=self.device)
+            for i, l_out in enumerate(l_out_layer):
+                num_summed_elements = sum([mul_in * (2 * min(l_out, l_in) + 1) for mul_in, l_in in zip(mul_in_layer, l_in_layer)])  # (l_out + l_in) - |l_out - l_in| = 2*min(l_out, l_in)
+                for j, (mul_in, l_in) in enumerate(zip(mul_in_layer, l_in_layer)):
                     norm_coef[i, j, 0] = lm_normalization(l_out, l_in) / math.sqrt(mul_in)
                     norm_coef[i, j, 1] = lm_normalization(l_out, l_in) / math.sqrt(num_summed_elements)
-
             self.norm_coef_list.append(norm_coef)
 
     def calculate_rsh_normalization_coefficients(self):
@@ -147,10 +162,10 @@ class DataHub(nn.Module):
 
     def calculate_offsets(self):
         from itertools import accumulate
-        for Rs_in, Rs_out in zip(self.representations[:-1], self.representations[1:]):
-            tmp_R_base_offset = list(accumulate([mul_out * mul_in * (2 * min(l_out, l_in) + 1) for (mul_out, l_out, _) in Rs_out for (mul_in, l_in, _) in Rs_in]))
-            tmp_grad_base_offset = list(accumulate(mul_out * (2 * l_out + 1) for mul_out, l_out, _ in Rs_out))
-            tmp_features_base_offset = list(accumulate(mul_in * (2 * l_in + 1) for mul_in, l_in, _ in Rs_in))
+        for l_in_layer, mul_in_layer, l_out_layer, mul_out_layer in zip(self.l_in_list, self.mul_in_list, self.l_out_list, self.mul_out_list):
+            tmp_R_base_offset = list(accumulate([mul_out * mul_in * (2 * min(l_out, l_in) + 1) for (mul_out, l_out) in zip(mul_out_layer, l_out_layer) for (mul_in, l_in) in zip(mul_in_layer, l_in_layer)]))
+            tmp_grad_base_offset = list(accumulate(mul_out * (2 * l_out + 1) for (mul_out, l_out) in zip(mul_out_layer, l_out_layer)))
+            tmp_features_base_offset = list(accumulate(mul_in * (2 * l_in + 1) for (mul_in, l_in) in zip(mul_in_layer, l_in_layer)))
 
             tmp_R_base_offset.insert(0, 0)
             tmp_grad_base_offset.insert(0, 0)
@@ -229,7 +244,6 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
 
         return F_next
 
-
     @staticmethod
     def backward(ctx, grad_output):
         F, R = ctx.saved_tensors  # transposed
@@ -292,33 +306,92 @@ class PeriodicConvolutionWithKernelFunction(torch.autograd.Function):
         return F_grad, R_grad, None, None
 
 
-class EQNetwork(nn.Module):
-    def __init__(self, representations, max_radius):
+class Gate(nn.Module):
+    def __init__(self, data_hub, number_of_the_layer, scalar_activation, gate_activation):
         super().__init__()
+        self.data_hub = data_hub
+        self.n = number_of_the_layer
+        self.gates_count = self.data_hub.gates_count_list[self.n]
+        self.scalar_activation = scalar_activation
+        self.gate_activation = gate_activation
 
-        representations = [[(mul, l) for l, mul in enumerate(rs)] for rs in representations]
+    def forward(self, features):
+        # TODO: move this to CUDA (blocks over l_out)
+        out = features.new_empty((features.shape[0], features.shape[1] - self.gates_count))
+        filters_l_zero_count = self.data_hub.grad_base_offsets[self.n][1] - self.gates_count
+        out[:, :filters_l_zero_count] = self.scalar_activation(features[:, self.gates_count:self.data_hub.grad_base_offsets[self.n][1]])        # scalars, l = 0
+        if self.gates_count > 0:
+            l_out_list = self.data_hub.l_out_list[self.n]
+            mul_out_list = self.data_hub.mul_out_list[self.n]
+            features_offsets = self.data_hub.grad_base_offsets[self.n]                                                                          # intentional
 
-        # TODO: unwind into 'independent' blocks
-        # R = partial(CosineBasisModel, max_radius=max_radius, number_of_basis=10, h=100, L=2, act=relu)
-        # K = partial(Kernel, RadialModel=R)
-        # C = partial(PeriodicConvolutionPrep, Kernel=K)
+            gates = self.gate_activation(features[:, :self.gates_count])
+            gates_offset = 0
+            out_offset = filters_l_zero_count
+            for l_out, u_size, f_end, f_start in zip(l_out_list[1:], mul_out_list[1:], features_offsets[2:], features_offsets[1:-1]):
+                i_size = 2*l_out + 1
+                out[:, out_offset:out_offset+u_size*i_size] = features[:, f_start:f_end] * gates[:, gates_offset:gates_offset+u_size].unsqueeze(2).expand(-1, -1, i_size).reshape(-1, u_size*i_size)
+                gates_offset += u_size
+                out_offset += u_size * i_size
 
-        # TODO: so that here it is sequential
-        # self.firstlayers = torch.nn.ModuleList([
-        #     GatedBlock(Rs_in, Rs_out, relu, sigmoid, C)
-        #     for Rs_in, Rs_out in zip(representations, representations[1:])
-        # ])
+        return out
 
-    def forward(self, radii, bs_slice, charges):
-        p = next(self.parameters())
-        # features = p.new_ones(len(charges), 1)
-        features = p.new_tensor(charges.numpy()/94 - 0.5).unsqueeze(1)
 
-        # hm, why there was enumerate?
-        for i, m in enumerate(self.firstlayers):
-            pass
-            # TODO: div(2) means div(sqrt(number of neighbor atoms)). Incorporate into Gate?
-            # features = m(features.div(2), radii, bs_slice)
+class EQLayer(nn.Module):
+    def __init__(self, data_hub, number_of_the_layer, radial_basis_function_kwargs, gate_kwargs, radial_basis_function=CosineBasisModel, convolution=PeriodicConvolutionWithKernel, gate=Gate, device=torch.device(type='cuda', index=0)):
+        super().__init__()
+        self.data_hub = data_hub
+        self.n = number_of_the_layer
+        self.radial_basis_function_kwargs = radial_basis_function_kwargs # or {'max_radius': 5.0, 'number_of_basis': 100, 'h': 100, 'L': 2, 'act': relu}
+        self.gate_kwargs = gate_kwargs # or {'scalar_activation': relu, 'gate_activation': sigmoid}
 
-        features = torch.mean(features, dim=0)
-        return features
+        self.radial_basis_trainable_function = radial_basis_function(out_dim=self.data_hub.R_base_offsets[self.n][-1].item(), **radial_basis_function_kwargs).to(device)
+
+        self.convolution = convolution(self.data_hub, self.n)
+        if self.data_hub.has_gates[self.n]:
+            self.gate = gate(self.data_hub, self.n, **gate_kwargs)
+
+    def forward(self, features):
+        rbf_coefficients = self.radial_basis_trainable_function(self.data_hub.radii)
+        return self.gate(self.convolution(features, rbf_coefficients)) if hasattr(self, 'gate') else self.convolution(features, rbf_coefficients)
+
+
+class EQNetwork(nn.Module):
+    def __init__(self, representations, radial_basis_functions_kwargs, gate_kwargs, radial_basis_function=CosineBasisModel, convolution=PeriodicConvolutionWithKernel, gate=Gate, has_gates=True, normalization='norm', device=torch.device(type='cuda', index=0)):
+        super().__init__()
+        number_of_layers = len(representations) - 1
+
+        # region input check
+        assert isinstance(has_gates, bool) or \
+               (isinstance(has_gates, (list, tuple)) and len(has_gates) == number_of_layers and all(isinstance(has_gate, bool) for has_gate in has_gates)), \
+            "has_gates should be specified as a single boolean value or as list/tuple of boolean values that matches number of layers"
+
+        assert isinstance(radial_basis_functions_kwargs, dict) or \
+               (isinstance(radial_basis_functions_kwargs, (list, tuple)) and len(radial_basis_functions_kwargs) == number_of_layers and all(isinstance(rbf_args, dict) for rbf_args in radial_basis_functions_kwargs)), \
+            "radial_basis_functions_kwargs should be specified as a single dict (shared for all layers) or as list/tuple of dicts - one for each layers"
+
+        assert isinstance(gate_kwargs, dict) or \
+               (isinstance(gate_kwargs, (list, tuple)) and len(gate_kwargs) == number_of_layers and all(isinstance(g_args, dict) for g_args in gate_kwargs)), \
+            "gate_kwargs should be specified as a single dict (shared for all layers) or as list/tuple of dicts - one for each layers"
+        # endregion
+
+        has_gates = [has_gates] * number_of_layers if isinstance(has_gates, bool) else has_gates
+
+        # construct representations, without gates - gates got added in Data Hub where necessary
+        # can have mixed specifications (short - multiplicity, long - multiplicity and rotation order) across layers, but within layer it should be consistent
+        representations = [[(mul, l) if isinstance(mul, int) else mul for l, mul in enumerate(rs)] for rs in representations]
+
+        self.data_hub = DataHub(representations, has_gates, normalization, device)
+
+        radial_basis_functions_kwargs_list = [radial_basis_functions_kwargs] * number_of_layers if isinstance(radial_basis_functions_kwargs, dict) else radial_basis_functions_kwargs
+        gate_kwargs_list = [gate_kwargs] * number_of_layers if isinstance(gate_kwargs, dict) else gate_kwargs
+
+        layers = []
+        for i in range(number_of_layers):
+            layers.append(EQLayer(self.data_hub, i, radial_basis_functions_kwargs_list[i], gate_kwargs_list[i], radial_basis_function, convolution, gate, device))
+
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, features, radii_vectors, n_norm, ab_p_to_a, ab_p_to_b):
+        self.data_hub(radii_vectors, n_norm, ab_p_to_a, ab_p_to_b)
+        return self.layers(features).mean(dim=0)
