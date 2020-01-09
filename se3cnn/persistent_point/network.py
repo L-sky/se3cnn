@@ -34,28 +34,32 @@ class EQNetwork(nn.Module):
 
         # region input check
         assert isinstance(has_gates, bool) or \
-               (isinstance(has_gates, (list, tuple)) and len(has_gates) == number_of_layers and all(isinstance(has_gate, bool) for has_gate in has_gates)), \
+               (isinstance(has_gates, (list, tuple)) and (len(has_gates) == 1 or len(has_gates) == number_of_layers) and all(isinstance(has_gate, bool) for has_gate in has_gates)), \
             "has_gates should be specified as a single boolean value or as list/tuple of boolean values that matches number of layers"
 
         assert isinstance(radial_basis_functions_kwargs, dict) or \
-               (isinstance(radial_basis_functions_kwargs, (list, tuple)) and len(radial_basis_functions_kwargs) == number_of_layers and all(isinstance(rbf_args, dict) for rbf_args in radial_basis_functions_kwargs)), \
+               (isinstance(radial_basis_functions_kwargs, (list, tuple)) and (len(radial_basis_functions_kwargs) == 1 or len(radial_basis_functions_kwargs) == number_of_layers) and all(isinstance(rbf_args, dict) for rbf_args in radial_basis_functions_kwargs)), \
             "radial_basis_functions_kwargs should be specified as a single dict (shared for all layers) or as list/tuple of dicts - one for each layers"
 
         assert isinstance(gate_kwargs, dict) or \
-               (isinstance(gate_kwargs, (list, tuple)) and len(gate_kwargs) == number_of_layers and all(isinstance(g_args, dict) for g_args in gate_kwargs)), \
+               (isinstance(gate_kwargs, (list, tuple)) and (len(gate_kwargs) == 1 or len(gate_kwargs) == number_of_layers) and all(isinstance(g_args, dict) for g_args in gate_kwargs)), \
             "gate_kwargs should be specified as a single dict (shared for all layers) or as list/tuple of dicts - one for each layers"
         # endregion
 
-        has_gates = [has_gates] * number_of_layers if isinstance(has_gates, bool) else has_gates
+        has_gates_list = [has_gates] if isinstance(has_gates, bool) else has_gates
+        has_gates_list = has_gates_list * number_of_layers if len(has_gates_list) == 1 else has_gates_list
 
         # construct representations, without gates - gates got added in Data Hub where necessary
         # can have mixed specifications (short - multiplicity, long - multiplicity and rotation order) across layers, but within layer it should be consistent
         representations = [[(mul, l) if isinstance(mul, int) else mul for l, mul in enumerate(rs)] for rs in representations]
 
-        self.data_hub = DataHub(representations, has_gates, normalization, device)
+        self.data_hub = DataHub(representations, has_gates_list, normalization, device)
 
-        radial_basis_functions_kwargs_list = [radial_basis_functions_kwargs] * number_of_layers if isinstance(radial_basis_functions_kwargs, dict) else radial_basis_functions_kwargs
-        gate_kwargs_list = [gate_kwargs] * number_of_layers if isinstance(gate_kwargs, dict) else gate_kwargs
+        radial_basis_functions_kwargs_list = [radial_basis_functions_kwargs] if isinstance(radial_basis_functions_kwargs, dict) else radial_basis_functions_kwargs
+        radial_basis_functions_kwargs_list = radial_basis_functions_kwargs_list * number_of_layers if len(radial_basis_functions_kwargs_list) == 1 else radial_basis_functions_kwargs_list
+
+        gate_kwargs_list = [gate_kwargs] if isinstance(gate_kwargs, dict) else gate_kwargs
+        gate_kwargs_list = gate_kwargs_list * number_of_layers if len(gate_kwargs_list) == 1 else gate_kwargs_list
 
         layers = []
         for i in range(number_of_layers):

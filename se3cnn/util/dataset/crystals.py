@@ -215,21 +215,22 @@ class CrystalCIF_v2(Dataset):
              |____geometries.pth
              |____atomic_charges.pth
              |____lattice_params.pth
-             |____max_radius_{max_radius_value}
+             |____a_partitions.pth
+             |____radial_cutoff_{radial_cutoff_value}
                     |_____radii.pth
                     |_____map_ab_p_to_a.pth
                     |_____map_ab_p_to_b.pth
                     |_____partitions.pth
     """
-    def __init__(self, root, max_radius, material_properties=None):
+    def __init__(self, root, radial_cutoff, material_properties=None):
         """
         :param root: string, path to the root directory of dataset
-        :param max_radius: float, radius of sphere
+        :param radial_cutoff: float, radius of sphere
         :param material_properties: (optional) list of file paths containing additional properties, one type of property per file
         :param bs_pad: integer, length of fixed size vector in which we embed bs (single list)
         """
         preprocessed_dir = join(root, 'preprocessed')
-        preprocessed_radius_dir = join(preprocessed_dir, f'max_radius_{max_radius}')
+        preprocessed_radius_dir = join(preprocessed_dir, f'radial_cutoff_{radial_cutoff}')
 
         if (
                 isdir(preprocessed_radius_dir)
@@ -240,9 +241,9 @@ class CrystalCIF_v2(Dataset):
                      or not isfile(join(preprocessed_radius_dir, 'ab_p_partitions.pth')))
         ):
             rmtree(preprocessed_radius_dir)
-            CrystalCIF_v2.preprocess(root, max_radius)
+            CrystalCIF_v2.preprocess(root, radial_cutoff)
         elif not isdir(preprocessed_radius_dir):
-            CrystalCIF_v2.preprocess(root, max_radius)
+            CrystalCIF_v2.preprocess(root, radial_cutoff)
         else:
             pass
 
@@ -258,7 +259,6 @@ class CrystalCIF_v2(Dataset):
         self.map_ab_p_to_b = torch.load(join(preprocessed_radius_dir, 'map_ab_p_to_b.pth'))
         self.n_norm = torch.load(join(preprocessed_radius_dir, 'n_norm.pth'))
         self.ab_p_partitions = torch.load(join(preprocessed_radius_dir, 'ab_p_partitions.pth'))
-
 
         if material_properties:
             self.properties = torch.stack([torch.load(join(root, property_path)) for property_path in material_properties], dim=1)
@@ -276,21 +276,21 @@ class CrystalCIF_v2(Dataset):
         return self.size
 
     @staticmethod
-    def preprocess(root, max_radius=None):
+    def preprocess(root, radial_cutoff=None):
         """
         Allows calls without class instance: CrystalCIF.preprocess(...).
         :param root: string, path to the root directory of dataset
-        :param max_radius: float, (optional) radius of sphere
+        :param radial_cutoff: float, (optional) radius of sphere
         """
         # region 0. Set up
         preprocessed_dir = join(root, 'preprocessed')
         if not isdir(preprocessed_dir):
             mkdir(preprocessed_dir)
 
-        if max_radius:
-            max_radius_dir = join(preprocessed_dir, f'max_radius_{max_radius}')
-            if not isdir(max_radius_dir):
-                mkdir(max_radius_dir)
+        if radial_cutoff:
+            radial_cutoff_dir = join(preprocessed_dir, f'radial_cutoff_{radial_cutoff}')
+            if not isdir(radial_cutoff_dir):
+                mkdir(radial_cutoff_dir)
         # endregion
 
         # region 1. Init
@@ -300,7 +300,7 @@ class CrystalCIF_v2(Dataset):
         atomic_charges_list = []
         lattice_params_list = []
 
-        if max_radius:
+        if radial_cutoff:
             map_ab_p_to_a_list = []
             map_ab_p_to_b_list = []
             radii_list = []
@@ -312,7 +312,7 @@ class CrystalCIF_v2(Dataset):
         # region 2. Process
         ab_p_partition_start = 0
         a_partition_start = 0
-        for file_rel_path in tqdm(index):
+        for file_rel_path in tqdm(index, desc=f"Preprocessing for {radial_cutoff}"):
             structure = pymatgen.Structure.from_file((join(root, 'cif', file_rel_path)))
 
             site_a_coords_entry = torch.stack([torch.from_numpy(site.coords) for site in structure.sites])
@@ -321,10 +321,10 @@ class CrystalCIF_v2(Dataset):
             atomic_charges_list.extend([atom.number for atom in structure.species])
             lattice_params_list.append(structure.lattice.abc + structure.lattice.angles)
 
-            if max_radius:
+            if radial_cutoff:
                 radii_proxy_list = []
                 for a, site_a_coords in enumerate(site_a_coords_entry):
-                    nei = structure.get_sites_in_sphere(site_a_coords.numpy(), max_radius, include_index=True)
+                    nei = structure.get_sites_in_sphere(site_a_coords.numpy(), radial_cutoff, include_index=True)
                     assert nei, f"Encountered empty nei for {file_rel_path}: {site_a_coords}"
 
                     entry_data = [entry[2] for entry in nei]
@@ -351,7 +351,7 @@ class CrystalCIF_v2(Dataset):
         lattice_params = torch.tensor(lattice_params_list)
         del lattice_params_list
 
-        if max_radius:
+        if radial_cutoff:
             map_ab_p_to_a = torch.tensor(map_ab_p_to_a_list, dtype=torch.int32)
             del map_ab_p_to_a_list
 
@@ -381,19 +381,19 @@ class CrystalCIF_v2(Dataset):
         torch.save(a_partitions, join(preprocessed_dir, 'a_partitions.pth'))                        # tensor [n_structures, 2]              - start/end of a_slice
         del site_a_coords_list, atomic_charges, lattice_params, a_partitions
 
-        if max_radius:
-            torch.save(map_ab_p_to_a, join(max_radius_dir, 'map_ab_p_to_a.pth'))                    # tensor [sum(r_i)]
+        if radial_cutoff:
+            torch.save(map_ab_p_to_a, join(radial_cutoff_dir, 'map_ab_p_to_a.pth'))                    # tensor [sum(r_i)]
             del map_ab_p_to_a
 
-            torch.save(map_ab_p_to_b, join(max_radius_dir, 'map_ab_p_to_b.pth'))                    # tensor [sum(r_i)]
+            torch.save(map_ab_p_to_b, join(radial_cutoff_dir, 'map_ab_p_to_b.pth'))                    # tensor [sum(r_i)]
             del map_ab_p_to_b
 
-            torch.save(radii, join(max_radius_dir, 'radii.pth'))                                    # tensor [sum(r_i), 3]                  - xyz
+            torch.save(radii, join(radial_cutoff_dir, 'radii.pth'))                                    # tensor [sum(r_i), 3]                  - xyz
             del radii
 
-            torch.save(n_norm, join(max_radius_dir, 'n_norm.pth'))
+            torch.save(n_norm, join(radial_cutoff_dir, 'n_norm.pth'))
             del n_norm
 
-            torch.save(ab_p_partitions, join(max_radius_dir, 'ab_p_partitions.pth'))                # tensor [z, 2]                         - start/end of ab_p slices
+            torch.save(ab_p_partitions, join(radial_cutoff_dir, 'ab_p_partitions.pth'))                # tensor [z, 2]                         - start/end of ab_p slices
             del ab_p_partitions
         # endregion
